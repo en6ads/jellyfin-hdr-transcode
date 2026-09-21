@@ -343,9 +343,110 @@ namespace MediaBrowser.Controller.MediaEncoding
             // Let transpose_vt optional for the time being.
         }
 
+        /// <summary>
+        /// Whether this job should preserve HDR through the re-encode instead of tone-mapping to SDR.
+        /// </summary>
+        /// <remarks>
+        /// Every tone-map availability check consults this first, so returning true removes the
+        /// tone-map stage from whichever vendor filter chain is in use without that chain needing
+        /// to know why. The per-encoder test at the end is deliberately an allow-list: an encoder
+        /// that has not been verified falls through to tone-mapping, which is the existing
+        /// behaviour, so support can be added one backend at a time without regressing the rest.
+        ///
+        /// Note this deliberately covers Dolby Vision profiles whose base layer is a conformant
+        /// HDR10 or HLG picture, since re-encoding drops the RPU and leaves exactly that. Profile
+        /// 5 is excluded because its base layer is not conformant.
+        /// </remarks>
+        private bool IsHdrPassthroughAvailable(EncodingJobInfo state, EncodingOptions options)
+        {
+            var videoStream = state.VideoStream;
+            if (!options.EnableHdrPassthrough
+                || videoStream is null
+                || videoStream.VideoRange != VideoRange.HDR
+                || GetVideoColorBitDepth(state) < 10)
+            {
+                return false;
+            }
+
+            // Dolby Vision sources are included on purpose, because re-encoding keeps only the
+            // base layer: the RPU carries the dynamic DV metadata and no encoder here reproduces
+            // it, so what survives is the BL's own static HDR10 or HLG grade. For profile 8.1 and
+            // profile 7 that BL is a complete, correctly signalled HDR10 picture, which is
+            // exactly what we want to preserve.
+            //
+            // Profile 5 is the exception and must keep tone-mapping: its base layer is IPT rather
+            // than a conformant HDR10 signal, so passing it through unreshaped would give wildly
+            // wrong colour. DOVIWithSDR is excluded because its base layer is SDR - there is no
+            // HDR to preserve. DOVIInvalid is excluded as unclassifiable.
+            if (videoStream.VideoRangeType
+                is VideoRangeType.DOVI
+                or VideoRangeType.DOVIInvalid
+                or VideoRangeType.DOVIWithSDR)
+            {
+                return false;
+            }
+
+            // What we will actually emit is decided by the base layer's own transfer function,
+            // not by the source's range type - a DOVIWithHDR10 source becomes plain HDR10 once
+            // the RPU is gone.
+            var outputRangeType = string.Equals(videoStream.ColorTransfer, "arib-std-b67", StringComparison.OrdinalIgnoreCase)
+                ? VideoRangeType.HLG
+                : VideoRangeType.HDR10;
+
+            // Anything that is not PQ or HLG at the base layer has no HDR to carry through.
+            if (!string.Equals(videoStream.ColorTransfer, "smpte2084", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(videoStream.ColorTransfer, "arib-std-b67", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // The client must support the range we are about to hand it, which is the OUTPUT
+            // range above - not the source's. A device that cannot present Dolby Vision can still
+            // present the HDR10 we are about to make from it.
+            //
+            // Clients declare range support per codec, and in practice they only declare it for
+            // codecs they can direct play - a device profile that offers AV1 purely as a
+            // transcode target sends no av1-rangetype at all. Falling back to the source codec's
+            // declaration covers that: the client is telling us which ranges its display can
+            // present, and that does not change with the codec we happen to encode into.
+            var requestedRangeTypes = state.GetRequestedRangeTypes(state.ActualOutputVideoCodec);
+            if (requestedRangeTypes.Length == 0)
+            {
+                requestedRangeTypes = state.GetRequestedRangeTypes(videoStream.Codec);
+            }
+
+            if (requestedRangeTypes.Length == 0
+                || !requestedRangeTypes.Contains(outputRangeType.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // 10-bit output is required to carry HDR, which rules H.264 out in practice.
+            var outputCodec = state.ActualOutputVideoCodec;
+            if (!string.Equals(outputCodec, "hevc", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(outputCodec, "av1", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return IsHdrPassthroughSupportedByEncoder(GetVideoEncoder(state, options));
+        }
+
+        /// <summary>
+        /// The staging allow-list described in <see cref="IsHdrPassthroughAvailable"/>. Verified
+        /// on real hardware: both QSV encoders emit correctly tagged 10-bit HDR10 and propagate
+        /// mastering-display and content-light-level side data without any explicit parameters.
+        /// </summary>
+        private static bool IsHdrPassthroughSupportedByEncoder(string encoder)
+            => encoder is not null
+                && (encoder.Contains("qsv", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(encoder, "libx265", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(encoder, "libsvtav1", StringComparison.OrdinalIgnoreCase));
+
         private bool IsSwTonemapAvailable(EncodingJobInfo state, EncodingOptions options)
         {
             if (state.VideoStream is null
+                || IsHdrPassthroughAvailable(state, options)
                 || GetVideoColorBitDepth(state) < 10
                 || !_mediaEncoder.SupportsFilter("tonemapx"))
             {
@@ -359,6 +460,7 @@ namespace MediaBrowser.Controller.MediaEncoding
         {
             if (state.VideoStream is null
                 || !options.EnableTonemapping
+                || IsHdrPassthroughAvailable(state, options)
                 || GetVideoColorBitDepth(state) < 10)
             {
                 return false;
@@ -407,6 +509,7 @@ namespace MediaBrowser.Controller.MediaEncoding
         {
             if (state.VideoStream is null
                 || !options.EnableVppTonemapping
+                || IsHdrPassthroughAvailable(state, options)
                 || GetVideoColorBitDepth(state) < 10)
             {
                 return false;
@@ -4496,6 +4599,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             var doVppTonemap = IsIntelVppTonemapAvailable(state, options);
             var doOclTonemap = !doVppTonemap && IsHwTonemapAvailable(state, options);
             var doTonemap = doVppTonemap || doOclTonemap;
+            var doHdrPassthrough = !doTonemap && IsHdrPassthroughAvailable(state, options);
 
             var hasSubs = state.SubtitleStream is not null && ShouldEncodeSubtitle(state);
             var hasTextSubs = hasSubs && state.SubtitleStream.IsTextSubtitleStream;
@@ -4516,7 +4620,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             /* Make main filters for video stream */
             var mainFilters = new List<string>();
 
-            mainFilters.Add(GetOverwriteColorPropertiesParam(state, doTonemap));
+            mainFilters.Add(GetOverwriteColorPropertiesParam(state, doTonemap, doHdrPassthrough));
 
             if (isSwDecoder)
             {
@@ -4528,7 +4632,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                     mainFilters.Add(swDeintFilter);
                 }
 
-                var outFormat = doOclTonemap ? "yuv420p10le" : (hasGraphicalSubs ? "yuv420p" : "nv12");
+                var outFormat = doOclTonemap || doHdrPassthrough ? "yuv420p10le" : (hasGraphicalSubs ? "yuv420p" : "nv12");
                 var swScaleFilter = GetSwScaleFilter(state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH);
                 if (isMjpegEncoder && !doOclTonemap)
                 {
@@ -4595,6 +4699,14 @@ namespace MediaBrowser.Controller.MediaEncoding
 
                 var outFormat = doOclTonemap ? ((doVppTranspose || isRext) ? "p010" : string.Empty) : "nv12";
                 outFormat = twoPassVppTonemap ? "p010" : outFormat;
+
+                // Preserving HDR requires 10-bit all the way to the encoder. This branch would
+                // otherwise pick nv12 and quietly drop the source back to 8-bit before the
+                // encoder ever sees it, leaving correctly tagged but truncated HDR.
+                if (doHdrPassthrough)
+                {
+                    outFormat = "p010";
+                }
 
                 var swapOutputWandH = doVppTranspose && swapWAndH;
                 var hwScaleFilter = GetHwScaleFilter("vpp", "qsv", outFormat, swapOutputWandH, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH);
@@ -6375,8 +6487,15 @@ namespace MediaBrowser.Controller.MediaEncoding
         }
 
         public string GetOverwriteColorPropertiesParam(EncodingJobInfo state, bool isTonemapAvailable)
+            => GetOverwriteColorPropertiesParam(state, isTonemapAvailable, false);
+
+        public string GetOverwriteColorPropertiesParam(EncodingJobInfo state, bool isTonemapAvailable, bool isHdrPassthrough)
         {
-            if (isTonemapAvailable)
+            // Preserving HDR means keeping the source's own transfer and primaries all the way
+            // to the encoder. Falling through to GetOutputSdrParam here would tag PQ or HLG
+            // pixels as bt709, which is what makes HDR look washed out when tone-mapping is
+            // merely switched off rather than deliberately bypassed.
+            if (isTonemapAvailable || isHdrPassthrough)
             {
                 return GetInputHdrParam(state.VideoStream?.ColorTransfer);
             }
