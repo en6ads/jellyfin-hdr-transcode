@@ -166,6 +166,18 @@ public class EncodingOptions
     public bool EnableVideoToolboxTonemapping { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether HDR is preserved when re-encoding, instead of
+    /// being tone-mapped to SDR.
+    /// </summary>
+    /// <remarks>
+    /// When enabled, an HDR10 or HLG source destined for a client that has declared support for
+    /// that range type is re-encoded as 10-bit HDR with its colour properties intact, rather
+    /// than tone-mapped down. Tone-mapping remains the behaviour for every case this does not
+    /// cover, including Dolby Vision and HDR10+ sources and clients that cannot present HDR.
+    /// </remarks>
+    public bool EnableHdrPassthrough { get; set; }
+
+    /// <summary>
     /// Gets or sets the tone-mapping algorithm.
     /// </summary>
     public TonemappingAlgorithm TonemappingAlgorithm { get; set; }
