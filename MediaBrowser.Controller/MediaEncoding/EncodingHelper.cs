@@ -348,22 +348,33 @@ namespace MediaBrowser.Controller.MediaEncoding
         /// </summary>
         /// <remarks>
         /// Every tone-map availability check consults this first, so returning true removes the
-        /// tone-map stage from whichever vendor filter chain is in use without that chain needing
-        /// to know why. The per-encoder test at the end is deliberately an allow-list: an encoder
-        /// that has not been verified falls through to tone-mapping, which is the existing
-        /// behaviour, so support can be added one backend at a time without regressing the rest.
+        /// tone-map stage from whichever vendor filter chain is in use. That is only safe for a
+        /// chain that then keeps the video 10-bit and tagged with its HDR colour properties, so
+        /// <see cref="IsHdrPassthroughSupportedByPipeline"/> allows exactly the chains that do;
+        /// everything else falls through to tone-mapping, which is the existing behaviour.
         ///
         /// Note this deliberately covers Dolby Vision profiles whose base layer is a conformant
         /// HDR10 or HLG picture, since re-encoding drops the RPU and leaves exactly that. Profile
-        /// 5 is excluded because its base layer is not conformant.
+        /// 5 is excluded because its base layer is not conformant. HDR10+ is covered the same
+        /// way: its static HDR10 metadata is kept and the dynamic metadata is dropped.
         /// </remarks>
-        private bool IsHdrPassthroughAvailable(EncodingJobInfo state, EncodingOptions options)
+        /// <param name="state">Encoding state.</param>
+        /// <param name="options">Encoding options.</param>
+        /// <returns>Whether HDR is preserved rather than tone-mapped.</returns>
+        public bool IsHdrPassthroughAvailable(EncodingJobInfo state, EncodingOptions options)
         {
             var videoStream = state.VideoStream;
             if (!options.EnableHdrPassthrough
                 || videoStream is null
                 || videoStream.VideoRange != VideoRange.HDR
                 || GetVideoColorBitDepth(state) < 10)
+            {
+                return false;
+            }
+
+            // Burned-in subtitles are rendered as SDR graphics. Composited onto a PQ picture their
+            // white lands near peak brightness, so tone-map instead when subtitles are burned in.
+            if (state.SubtitleStream is not null && ShouldEncodeSubtitle(state))
             {
                 return false;
             }
@@ -429,19 +440,48 @@ namespace MediaBrowser.Controller.MediaEncoding
                 return false;
             }
 
-            return IsHdrPassthroughSupportedByEncoder(GetVideoEncoder(state, options));
+            // 10-bit HEVC is Main 10, so a client that lists its HEVC profiles must include it.
+            // AV1 Main already covers 10-bit.
+            if (string.Equals(outputCodec, "hevc", StringComparison.OrdinalIgnoreCase))
+            {
+                var requestedProfiles = state.GetRequestedProfiles("hevc");
+                if (requestedProfiles.Length > 0
+                    && !requestedProfiles.Any(p => string.Equals(WhiteSpaceRegex().Replace(p, string.Empty), "main10", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return false;
+                }
+            }
+
+            return IsHdrPassthroughSupportedByPipeline(options.HardwareAccelerationType, GetVideoEncoder(state, options));
         }
 
         /// <summary>
-        /// The staging allow-list described in <see cref="IsHdrPassthroughAvailable"/>. Verified
-        /// on real hardware: both QSV encoders emit correctly tagged 10-bit HDR10 and propagate
-        /// mastering-display and content-light-level side data without any explicit parameters.
+        /// The staging allow-list described in <see cref="IsHdrPassthroughAvailable"/>.
         /// </summary>
-        private static bool IsHdrPassthroughSupportedByEncoder(string encoder)
-            => encoder is not null
-                && (encoder.Contains("qsv", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(encoder, "libx265", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(encoder, "libsvtav1", StringComparison.OrdinalIgnoreCase));
+        /// <remarks>
+        /// Keyed on the filter chain as well as the encoder, because the software encoders can run
+        /// behind any acceleration type's chain, and only the software chain and the three Intel
+        /// chains (legacy, QSV on VA-API and QSV on D3D11) carry HDR through to the encoder.
+        /// The QSV encoders, libx265 and libsvtav1 all write mastering-display and
+        /// content-light-level side data without explicit parameters.
+        /// </remarks>
+        private static bool IsHdrPassthroughSupportedByPipeline(HardwareAccelerationType accelerationType, string encoder)
+        {
+            if (encoder is null)
+            {
+                return false;
+            }
+
+            var isSwEncoder = string.Equals(encoder, "libx265", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(encoder, "libsvtav1", StringComparison.OrdinalIgnoreCase);
+
+            return accelerationType switch
+            {
+                HardwareAccelerationType.none => isSwEncoder,
+                HardwareAccelerationType.qsv => isSwEncoder || encoder.Contains("qsv", StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+        }
 
         private bool IsSwTonemapAvailable(EncodingJobInfo state, EncodingOptions options)
         {
@@ -2315,8 +2355,13 @@ namespace MediaBrowser.Controller.MediaEncoding
                 profile = string.Empty;
             }
 
-            // We only transcode to HEVC 8-bit for now, force Main Profile.
-            if (profile.Contains("main10", StringComparison.OrdinalIgnoreCase)
+            // HEVC is transcoded to 8-bit Main Profile, except when HDR is preserved, which needs Main 10.
+            if (string.Equals("hevc", targetVideoCodec, StringComparison.OrdinalIgnoreCase)
+                && IsHdrPassthroughAvailable(state, encodingOptions))
+            {
+                profile = "main10";
+            }
+            else if (profile.Contains("main10", StringComparison.OrdinalIgnoreCase)
                 || profile.Contains("mainstill", StringComparison.OrdinalIgnoreCase))
             {
                 profile = "main";
@@ -3991,6 +4036,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             var doDeintH2645 = IsDeinterlaceAvailable(state);
             var doToneMap = IsSwTonemapAvailable(state, options);
             var requireDoviReshaping = doToneMap && state.VideoStream.VideoRangeType == VideoRangeType.DOVI;
+            var doHdrPassthrough = !doToneMap && IsHdrPassthroughAvailable(state, options);
 
             var hasSubs = state.SubtitleStream is not null && ShouldEncodeSubtitle(state);
             var hasTextSubs = hasSubs && state.SubtitleStream.IsTextSubtitleStream;
@@ -4004,7 +4050,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             /* Make main filters for video stream */
             var mainFilters = new List<string>();
 
-            mainFilters.Add(GetOverwriteColorPropertiesParam(state, doToneMap));
+            mainFilters.Add(GetOverwriteColorPropertiesParam(state, doToneMap, doHdrPassthrough));
 
             // INPUT sw surface(memory/copy-back from vram)
             // sw deint
@@ -4023,6 +4069,12 @@ namespace MediaBrowser.Controller.MediaEncoding
             else if (isV4l2Encoder)
             {
                 outFormat = "yuv420p";
+            }
+
+            // Preserving HDR requires 10-bit all the way to the encoder.
+            if (doHdrPassthrough)
+            {
+                outFormat = vidEncoder.Contains("qsv", StringComparison.OrdinalIgnoreCase) ? "p010le" : "yuv420p10le";
             }
 
             // sw scale
@@ -4787,11 +4839,11 @@ namespace MediaBrowser.Controller.MediaEncoding
             {
                 memoryOutput = true;
 
-                // OUTPUT nv12 surface(memory)
+                // OUTPUT nv12 (p010 when preserving HDR) surface(memory)
                 // prefer hwmap to hwdownload on opencl.
                 // qsv hwmap is not fully implemented for the time being.
                 mainFilters.Add(isHwmapUsable ? "hwmap=mode=read" : "hwdownload");
-                mainFilters.Add("format=nv12");
+                mainFilters.Add(doHdrPassthrough ? "format=p010le" : "format=nv12");
             }
 
             // OUTPUT nv12 surface(memory)
@@ -4899,6 +4951,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             var doVaVppTonemap = IsIntelVppTonemapAvailable(state, options);
             var doOclTonemap = !doVaVppTonemap && IsHwTonemapAvailable(state, options);
             var doTonemap = doVaVppTonemap || doOclTonemap;
+            var doHdrPassthrough = !doTonemap && IsHdrPassthroughAvailable(state, options);
             var doDeintH2645 = IsDeinterlaceAvailable(state);
 
             var hasSubs = state.SubtitleStream is not null && ShouldEncodeSubtitle(state);
@@ -4920,7 +4973,7 @@ namespace MediaBrowser.Controller.MediaEncoding
             /* Make main filters for video stream */
             var mainFilters = new List<string>();
 
-            mainFilters.Add(GetOverwriteColorPropertiesParam(state, doTonemap));
+            mainFilters.Add(GetOverwriteColorPropertiesParam(state, doTonemap, doHdrPassthrough));
 
             if (isSwDecoder)
             {
@@ -4932,7 +4985,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                     mainFilters.Add(swDeintFilter);
                 }
 
-                var outFormat = doOclTonemap ? "yuv420p10le" : (hasGraphicalSubs ? "yuv420p" : "nv12");
+                var outFormat = doOclTonemap || doHdrPassthrough ? "yuv420p10le" : (hasGraphicalSubs ? "yuv420p" : "nv12");
                 var swScaleFilter = GetSwScaleFilter(state, options, vidEncoder, swpInW, swpInH, threeDFormat, reqW, reqH, reqMaxW, reqMaxH);
                 if (isMjpegEncoder && !doOclTonemap)
                 {
@@ -4976,6 +5029,13 @@ namespace MediaBrowser.Controller.MediaEncoding
                 }
 
                 var outFormat = doTonemap ? (((isQsvDecoder && doVppTranspose) || isRext) ? "p010" : string.Empty) : "nv12";
+
+                // Preserving HDR requires 10-bit all the way to the encoder, not nv12.
+                if (doHdrPassthrough)
+                {
+                    outFormat = "p010";
+                }
+
                 var swapOutputWandH = isQsvDecoder && doVppTranspose && swapWAndH;
                 var hwScalePrefix = isQsvDecoder ? "vpp" : "scale";
                 var hwScaleFilter = GetHwScaleFilter(hwScalePrefix, hwFilterSuffix, outFormat, swapOutputWandH, swpInW, swpInH, reqW, reqH, reqMaxW, reqMaxH);
@@ -5042,11 +5102,11 @@ namespace MediaBrowser.Controller.MediaEncoding
             {
                 memoryOutput = true;
 
-                // OUTPUT nv12 surface(memory)
+                // OUTPUT nv12 (p010 when preserving HDR) surface(memory)
                 // prefer hwmap to hwdownload on opencl/vaapi.
                 // qsv hwmap is not fully implemented for the time being.
                 mainFilters.Add(isHwmapUsable ? "hwmap=mode=read" : "hwdownload");
-                mainFilters.Add("format=nv12");
+                mainFilters.Add(doHdrPassthrough ? "format=p010le" : "format=nv12");
             }
 
             // OUTPUT nv12 surface(memory)
