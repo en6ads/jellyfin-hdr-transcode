@@ -170,10 +170,14 @@ public class EncodingOptions
     /// being tone-mapped to SDR.
     /// </summary>
     /// <remarks>
-    /// When enabled, an HDR10 or HLG source destined for a client that has declared support for
-    /// that range type is re-encoded as 10-bit HDR with its colour properties intact, rather
-    /// than tone-mapped down. Tone-mapping remains the behaviour for every case this does not
-    /// cover, including Dolby Vision and HDR10+ sources and clients that cannot present HDR.
+    /// When enabled, a PQ or HLG source destined for a client that has declared support for the
+    /// output range is re-encoded to 10-bit HEVC or AV1 with its colour properties and static
+    /// metadata intact, rather than tone-mapped down. HDR10+ keeps its HDR10 base, and Dolby
+    /// Vision profiles with an HDR10 or HLG base layer (7, 8.1, 8.4) keep that base layer; their
+    /// dynamic metadata is dropped. Tone-mapping remains the behaviour for Dolby Vision profile 5
+    /// and SDR base layers, burned-in subtitles, clients that cannot present the output range,
+    /// and encoders or acceleration types not yet verified (currently only software and Intel QSV
+    /// are).
     /// </remarks>
     public bool EnableHdrPassthrough { get; set; }
 
