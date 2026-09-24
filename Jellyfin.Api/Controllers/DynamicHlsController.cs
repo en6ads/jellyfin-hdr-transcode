@@ -1637,26 +1637,13 @@ public class DynamicHlsController : BaseJellyfinApiController
                 Path.GetFileNameWithoutExtension(outputPath));
         }
 
-        // An audio encoder's priming delay makes the first packet's DTS negative - 2048 samples
-        // for AAC, 256 for AC-3, 312 for Opus. Combined with frag_discont above, which exists
-        // precisely so that the initial delay reaches MOOF::TRAF::TFDT, -copyts and
-        // -avoid_negative_ts disabled write that negative value into the box.
-        //
-        // TFDT::baseMediaDecodeTime is unsigned (ISO/IEC 14496-12), so a negative delay cannot
-        // be represented there. A strict parser rejects the segment outright: ExoPlayer raises
-        // "Top bit not zero: -2048" from FragmentedMp4Extractor.parseTfdt and surfaces it as an
-        // IO error, so it presents as a network fault that no amount of buffering fixes.
-        //
-        // This only arises at the start of a file. Every other segment is reached with -ss,
-        // which makes the base timestamp far larger than the priming delay, and make_zero MUST
-        // NOT be applied there - it would rebase the whole timeline (measured: a 20 minute
-        // resume drops from 28,800,772 to 1,796) and break segment alignment. Scoped to fMP4
-        // because mpegts has no TFDT and is unaffected.
-        //
-        // make_zero shifts every stream by the same amount, so the audio/video offset that the
-        // initial delay represents is preserved - rebased, not discarded.
-        var avoidNegativeTs = startNumber == 0 && segmentFormat.StartsWith("fmp4", StringComparison.OrdinalIgnoreCase)
-            ? "make_zero"
+        // The audio encoder's priming delay makes the first packet's DTS negative (e.g. -1024 for AAC),
+        // and with frag_discont that value is written into TFDT, whose baseMediaDecodeTime is unsigned.
+        // Strict parsers such as ExoPlayer reject the segment ("Top bit not zero").
+        // make_non_negative shifts all streams by the same amount, and only when the first timestamp is
+        // negative, so seeks and sources that already start later than the priming delay are untouched.
+        var avoidNegativeTs = string.Equals(segmentContainer, "mp4", StringComparison.OrdinalIgnoreCase)
+            ? "make_non_negative"
             : "disabled";
 
         return string.Format(
