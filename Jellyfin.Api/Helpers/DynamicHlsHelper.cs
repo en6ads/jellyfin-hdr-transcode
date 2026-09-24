@@ -467,13 +467,28 @@ public class DynamicHlsHelper
                     }
                 }
             }
+            else if (IsHdrPassthrough(state))
+            {
+                builder.Append(string.Equals(state.VideoStream.ColorTransfer, "arib-std-b67", StringComparison.OrdinalIgnoreCase)
+                    ? ",VIDEO-RANGE=HLG"
+                    : ",VIDEO-RANGE=PQ");
+            }
             else
             {
-                // Currently we only encode to SDR.
+                // Everything else is tone-mapped to SDR.
                 builder.Append(",VIDEO-RANGE=SDR");
             }
         }
     }
+
+    /// <summary>
+    /// Whether the video is re-encoded with its HDR preserved rather than tone-mapped to SDR.
+    /// </summary>
+    /// <param name="state">StreamState of the current stream.</param>
+    /// <returns>Whether the output video is 10-bit HDR.</returns>
+    private bool IsHdrPassthrough(StreamState state)
+        => !EncodingHelper.IsCopyCodec(state.OutputVideoCodec)
+            && _encodingHelper.IsHdrPassthroughAvailable(state, _serverConfigurationManager.GetEncodingOptions());
 
     /// <summary>
     /// Appends a CODECS field containing formatted strings of
@@ -913,7 +928,8 @@ public class DynamicHlsHelper
         if (string.Equals(codec, "h265", StringComparison.OrdinalIgnoreCase)
             || string.Equals(codec, "hevc", StringComparison.OrdinalIgnoreCase))
         {
-            string profile = GetOutputVideoCodecProfile(state, "hevc");
+            // HDR is preserved as Main 10, whatever profile the client listed first.
+            string profile = IsHdrPassthrough(state) ? "main10" : GetOutputVideoCodecProfile(state, "hevc");
             return HlsCodecStringHelpers.GetH265String(profile, level);
         }
 
@@ -921,13 +937,17 @@ public class DynamicHlsHelper
         {
             string profile = GetOutputVideoCodecProfile(state, "av1");
 
-            // Currently we only transcode to 8 bits AV1
+            // AV1 is transcoded to 8 bits, except when HDR is preserved.
             int bitDepth = 8;
             if (EncodingHelper.IsCopyCodec(state.OutputVideoCodec)
                 && state.VideoStream is not null
                 && state.VideoStream.BitDepth.HasValue)
             {
                 bitDepth = state.VideoStream.BitDepth.Value;
+            }
+            else if (IsHdrPassthrough(state))
+            {
+                bitDepth = 10;
             }
 
             return HlsCodecStringHelpers.GetAv1String(profile, level, false, bitDepth);
