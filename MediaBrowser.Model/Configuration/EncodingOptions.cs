@@ -101,6 +101,15 @@ public class EncodingOptions
     public DownMixStereoAlgorithms DownMixStereoAlgorithm { get; set; }
 
     /// <summary>
+    /// Gets or sets a value indicating whether the dynamic range control carried by AC-3 and E-AC-3 streams is ignored when the audio is decoded for transcoding.
+    /// </summary>
+    /// <remarks>
+    /// FFmpeg applies the stream's dynamic range gain words at full strength by default, which lowers the level of loud passages in
+    /// transcoded output. When enabled, <c>-drc_scale 0</c> is passed for AC-3 and E-AC-3 inputs so they decode at their mastered level.
+    /// </remarks>
+    public bool DisableAc3DynamicRangeControl { get; set; }
+
+    /// <summary>
     /// Gets or sets the maximum size of the muxing queue.
     /// </summary>
     public int MaxMuxingQueueSize { get; set; }

@@ -7589,6 +7589,15 @@ namespace MediaBrowser.Controller.MediaEncoding
                 inputModifier += " -async " + state.InputAudioSync;
             }
 
+            if (encodingOptions.DisableAc3DynamicRangeControl
+                && state.AudioStream is not null
+                && !IsCopyCodec(state.OutputAudioCodec)
+                && (string.Equals(state.AudioStream.Codec, "ac3", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(state.AudioStream.Codec, "eac3", StringComparison.OrdinalIgnoreCase)))
+            {
+                inputModifier += " -drc_scale 0";
+            }
+
             // The -fps_mode option cannot be applied to input
             if (!string.IsNullOrEmpty(state.InputVideoSync) && _mediaEncoder.EncoderVersion < new Version(5, 1))
             {
