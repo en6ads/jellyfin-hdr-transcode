@@ -1,3 +1,55 @@
+## About this fork
+
+This is a fork of [jellyfin](https://github.com/jellyfin/jellyfin) that **keeps HDR when the server
+transcodes**, instead of tone-mapping it to SDR, plus two fMP4 HLS timestamp fixes.
+
+This branch, `integration/av1-hdr-tfdt`, is the one to use. It is **Jellyfin 12.2** (`v12.2`) plus
+four commits:
+
+| commit | what it does |
+|---|---|
+| Preserve HDR when transcoding instead of tone-mapping to SDR | adds the HDR passthrough path and its `EncodingOptions` setting |
+| Only preserve HDR on filter chains that keep it 10-bit and tagged | guards the above so it only applies where the output really stays HDR |
+| Do not write a negative baseMediaDecodeTime into fMP4 TFDT | `baseMediaDecodeTime` is unsigned per ISO/IEC 14496-12 §8.8.12 |
+| Use make_non_negative instead of make_zero for fMP4 HLS | keeps relative timing rather than flattening it |
+
+Five files change, and the HDR behaviour is covered by 22 tests in
+`tests/Jellyfin.Controller.Tests/MediaEncoding/EncodingHelperHdrPassthroughTests.cs`.
+
+Enable it in the server's encoding settings (`EnableHdrPassthrough`, written to
+`encoding.xml`); it is off by default.
+
+### Building
+
+```
+dotnet build Jellyfin.sln -c Release
+dotnet test tests/Jellyfin.Controller.Tests/Jellyfin.Controller.Tests.csproj -c Release
+```
+
+Deploying over an existing install means replacing the whole set of managed assemblies, not just the
+four changed projects — mixing versions across them breaks assembly loading.
+
+### The Android client
+
+HDR transcoding is only half of it: the client has to ask for a stream it can play. The matching
+client fork is
+[en6ads/jellyfin-android-av1-transcode](https://github.com/en6ads/jellyfin-android-av1-transcode)
+(AV1/HEVC transcoding, Dolby Vision Profile 7 FEL playback, audio codec selection).
+
+### Branches
+
+| branch | what it is |
+|---|---|
+| `integration/av1-hdr-tfdt` | **this branch** — 12.2 plus all four commits; what gets deployed |
+| `pr/hdr-passthrough`, `pr/fmp4-negative-tfdt` | the same changes sliced per topic for submission upstream |
+| `master` | superseded — an older 12.1-era version of these patches, kept for history |
+| `v12.1-hdr-transcode.1` (tag) | the previous 12.1-based release |
+
+Issues with Jellyfin itself belong upstream. This is personal work shared so the same build can be
+reproduced; it is not an official Jellyfin release.
+
+---
+
 <h1 align="center">Jellyfin</h1>
 <h3 align="center">The Free Software Media System</h3>
 
