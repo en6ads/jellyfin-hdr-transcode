@@ -26,6 +26,7 @@ public sealed class ItemPersistenceAlternateVersionTests : SqliteDbTestFixture
 {
     private const string PrimaryPath = "/movies/Movie/Movie - 4K.mkv";
     private const string VersionPath = "/movies/Movie/Movie - 1080p.mkv";
+    private const string StalePath = "/movies/Movie/Movie - 2160p Combined.mkv";
 
     private readonly ItemPersistenceService _service;
     private readonly ILibraryManager? _previousLibraryManager;
@@ -180,6 +181,63 @@ public sealed class ItemPersistenceAlternateVersionTests : SqliteDbTestFixture
         // Pointing the old primary back would hide both, and with them the whole group.
         Assert.Null(ctx.BaseItems.First(e => e.Id.Equals(oldPrimaryId)).PrimaryVersionId);
         Assert.Equal(oldPrimaryId, ctx.BaseItems.First(e => e.Id.Equals(promotedId)).PrimaryVersionId);
+    }
+
+    [Fact]
+    public void SaveItems_OrphanedVersionStillLinkedByAnotherVideo_DeletesVersionAndLinks()
+    {
+        var primaryId = Guid.Parse("44444444-4444-4444-4444-444444444444");
+        var staleId = Guid.Parse("55555555-5555-5555-5555-555555555555");
+        var versionId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+
+        SaveOwnedVersion(primaryId, versionId);
+
+        // A video whose file has since been renamed away still lists the same version.
+        var stale = CreateMovie(staleId, StalePath);
+        stale.LocalAlternateVersions = [VersionPath];
+        _service.SaveItems([stale], CancellationToken.None);
+
+        // The version's file is retired, so the primary no longer lists it.
+        _service.SaveItems([CreateMovie(primaryId, PrimaryPath)], CancellationToken.None);
+
+        using var ctx = CreateDbContext();
+        Assert.False(ctx.BaseItems.Any(e => e.Id.Equals(versionId)));
+        Assert.Empty(ctx.LinkedChildren.Where(e => e.ChildId.Equals(versionId)));
+        Assert.True(ctx.BaseItems.Any(e => e.Id.Equals(primaryId)));
+        Assert.True(ctx.BaseItems.Any(e => e.Id.Equals(staleId)));
+    }
+
+    [Fact]
+    public void SaveItems_OrphanedVersionOwningAnItem_DeletesOwnedItemToo()
+    {
+        var primaryId = Guid.Parse("77777777-7777-7777-7777-777777777777");
+        var versionId = Guid.Parse("88888888-8888-8888-8888-888888888888");
+        var ownedId = Guid.Parse("99999999-9999-9999-9999-999999999999");
+
+        SaveOwnedVersion(primaryId, versionId);
+
+        var owned = CreateMovie(ownedId, "/movies/Movie/extras/Trailer.mkv");
+        owned.OwnerId = versionId;
+        _service.SaveItems([owned], CancellationToken.None);
+
+        _service.SaveItems([CreateMovie(primaryId, PrimaryPath)], CancellationToken.None);
+
+        using var ctx = CreateDbContext();
+        Assert.False(ctx.BaseItems.Any(e => e.Id.Equals(versionId) || e.Id.Equals(ownedId)));
+        Assert.True(ctx.BaseItems.Any(e => e.Id.Equals(primaryId)));
+    }
+
+    private void SaveOwnedVersion(Guid primaryId, Guid versionId)
+    {
+        _service.SaveItems([CreateMovie(primaryId, PrimaryPath)], CancellationToken.None);
+
+        var version = CreateMovie(versionId, VersionPath);
+        version.OwnerId = primaryId;
+        _service.SaveItems([version], CancellationToken.None);
+
+        var primary = CreateMovie(primaryId, PrimaryPath);
+        primary.LocalAlternateVersions = [VersionPath];
+        _service.SaveItems([primary], CancellationToken.None);
     }
 
     private static Movie CreateMovie(Guid id, string path) => new()

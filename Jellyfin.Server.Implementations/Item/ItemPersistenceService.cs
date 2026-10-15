@@ -57,7 +57,12 @@ public class ItemPersistenceService : IItemPersistenceService
 
         using var context = _dbProvider.CreateDbContext();
         using var transaction = context.Database.BeginTransaction();
+        DeleteItems(context, ids);
+        transaction.Commit();
+    }
 
+    private static void DeleteItems(JellyfinDbContext context, IReadOnlyList<Guid> ids)
+    {
         var date = (DateTime?)DateTime.UtcNow;
 
         var descendantIds = DescendantQueryHelper.GetOwnedDescendantIdsBatch(context, ids);
@@ -154,7 +159,6 @@ public class ItemPersistenceService : IItemPersistenceService
         context.Peoples.WhereOneOrMany(peopleIds, e => e.Id).Where(e => !e.BaseItems!.Any()).ExecuteDelete();
         context.TrickplayInfos.WhereOneOrMany(relatedItems, e => e.ItemId).ExecuteDelete();
         context.SaveChanges();
-        transaction.Commit();
     }
 
     /// <inheritdoc />
@@ -558,6 +562,7 @@ public class ItemPersistenceService : IItemPersistenceService
                 .ToHashSet()
             : [];
 
+        var orphanedItemIds = new List<Guid>();
         foreach (var item in tuples)
         {
             if (item.Item is Folder { LinkedChildrenLoaded: true } folder && folder.LinkedChildren.Length > 0)
@@ -769,6 +774,7 @@ public class ItemPersistenceService : IItemPersistenceService
                     {
                         var orphanedItems = context.BaseItems
                             .Where(e => orphanedLocalVersionIds.Contains(e.Id) && e.OwnerId == video.Id)
+                            .Select(e => e.Id)
                             .ToList();
 
                         if (orphanedItems.Count > 0)
@@ -778,7 +784,7 @@ public class ItemPersistenceService : IItemPersistenceService
                                 orphanedItems.Count,
                                 video.Name,
                                 video.Id);
-                            context.BaseItems.RemoveRange(orphanedItems);
+                            orphanedItemIds.AddRange(orphanedItems);
                         }
                     }
                 }
@@ -786,6 +792,14 @@ public class ItemPersistenceService : IItemPersistenceService
         }
 
         context.SaveChanges();
+
+        // Other items can still link to or be owned by an orphaned version, so it is deleted the
+        // same way as any other item rather than as a lone row.
+        if (orphanedItemIds.Count > 0)
+        {
+            DeleteItems(context, orphanedItemIds);
+        }
+
         transaction.Commit();
     }
 
