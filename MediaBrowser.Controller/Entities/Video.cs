@@ -599,6 +599,24 @@ namespace MediaBrowser.Controller.Entities
                 }
             }
 
+            // A version belongs to the video that lists it. One still owned by a previous primary, which
+            // may already be deleted while the cached item lives on, would fail to save on every refresh.
+            if (LibraryManager.GetItemById(id) is Video ownedElsewhere
+                && !ownedElsewhere.Id.Equals(Id)
+                && !ownedElsewhere.OwnerId.IsEmpty()
+                && !ownedElsewhere.OwnerId.Equals(Id))
+            {
+                Logger.LogInformation(
+                    "Moving version {Path} from owner {OldOwnerId} to {Name} ({Id})",
+                    path,
+                    ownedElsewhere.OwnerId,
+                    Name,
+                    Id);
+                ownedElsewhere.OwnerId = Id;
+                ownedElsewhere.SetPrimaryVersionId(Id);
+                await ownedElsewhere.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
+            }
+
             // A version is resolved on its own, so it does not learn whether the folder it sits in
             // holds other items. It has to share that with the version it belongs to, before the
             // refresh below acts on it.
