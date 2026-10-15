@@ -75,6 +75,58 @@ public class BaseItemTests
     }
 
     [Fact]
+    public async Task ValidateChildren_ChildFailsToSave_StillAddsNewChildren()
+    {
+        var previousLibrary = BaseItem.LibraryManager;
+        var previousRepository = BaseItem.ItemRepository;
+        var previousLogger = BaseItem.Logger;
+        var previousMediaSourceManager = BaseItem.MediaSourceManager;
+        var previousScheduler = Folder.LimitedConcurrencyLibraryScheduler;
+        var existingId = Guid.NewGuid();
+        var addedId = Guid.NewGuid();
+        var library = new Mock<ILibraryManager>();
+        library.Setup(l => l.UpdateItemAsync(It.Is<BaseItem>(i => i.Id.Equals(existingId)), It.IsAny<BaseItem>(), It.IsAny<ItemUpdateType>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("Simulated save failure"));
+        var repository = new Mock<MediaBrowser.Controller.Persistence.IItemRepository>();
+        repository.Setup(r => r.GetItemList(It.IsAny<InternalItemsQuery>()))
+            .Returns(new BaseItem[] { new Movie { Id = existingId, Path = "/media/review-folder/existing.mkv" } });
+        var directory = new Mock<IDirectoryService>();
+        directory.Setup(d => d.IsAccessible(It.IsAny<string>())).Returns(true);
+        var mediaSourceManager = new Mock<IMediaSourceManager>();
+        mediaSourceManager.Setup(x => x.GetPathProtocol(It.IsAny<string>())).Returns(MediaProtocol.File);
+        try
+        {
+            BaseItem.LibraryManager = library.Object;
+            BaseItem.ItemRepository = repository.Object;
+            BaseItem.Logger = Microsoft.Extensions.Logging.Abstractions.NullLogger<BaseItem>.Instance;
+            BaseItem.MediaSourceManager = mediaSourceManager.Object;
+            Folder.LimitedConcurrencyLibraryScheduler = new Mock<MediaBrowser.Controller.LibraryTaskScheduler.ILimitedConcurrencyLibraryScheduler>().Object;
+
+            // The rescan changes the existing child, so it is saved before the new one is added.
+            var folder = new ResolvedChildrenFolder(
+                new Movie { Id = existingId, Path = "/media/review-folder/existing.mkv", IsInMixedFolder = true },
+                new Movie { Id = addedId, Path = "/media/review-folder/added.mkv" })
+            {
+                Id = Guid.NewGuid(),
+                Path = "/media/review-folder"
+            };
+            await folder.ValidateChildren(new Progress<double>(), new MetadataRefreshOptions(directory.Object), recursive: false, cancellationToken: TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            library.Verify(
+                l => l.CreateItems(It.Is<IReadOnlyList<BaseItem>>(items => items.Count == 1 && items[0].Id.Equals(addedId)), folder, It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+        finally
+        {
+            BaseItem.LibraryManager = previousLibrary;
+            BaseItem.ItemRepository = previousRepository;
+            BaseItem.Logger = previousLogger;
+            BaseItem.MediaSourceManager = previousMediaSourceManager;
+            Folder.LimitedConcurrencyLibraryScheduler = previousScheduler;
+        }
+    }
+
+    [Fact]
     public void SetPrimaryVersionId_Null_RestoresTheItemsOwnPresentationKey()
     {
         var primaryId = Guid.NewGuid();
@@ -756,5 +808,12 @@ public class BaseItemTests
 
             throw new IOException("Simulated directory read failure");
         }
+    }
+
+    private sealed class ResolvedChildrenFolder(params BaseItem[] children) : Folder
+    {
+        public override string GetClientTypeName() => nameof(Folder);
+
+        protected override IEnumerable<BaseItem> GetNonCachedChildren(IDirectoryService directoryService) => children;
     }
 }
