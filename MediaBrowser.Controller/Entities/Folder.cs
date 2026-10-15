@@ -641,6 +641,18 @@ namespace MediaBrowser.Controller.Entities
 
                     // Transfer alternates from old primary to new primary
                     var localAlternateIds = LibraryManager.GetLocalAlternateVersionIds(oldPrimary).ToHashSet();
+
+                    // Deleting the old primary deletes everything it still owns, and a version can be owned
+                    // by it after its link is gone, so the files the new primary lists are checked as well.
+                    foreach (var path in newPrimary.LocalAlternateVersions ?? [])
+                    {
+                        var versionId = LibraryManager.GetNewItemId(path, newPrimary.GetType());
+                        if (LibraryManager.GetItemById(versionId) is Video version && version.OwnerId.Equals(oldPrimary.Id))
+                        {
+                            localAlternateIds.Add(versionId);
+                        }
+                    }
+
                     var allAlternateIds = localAlternateIds
                         .Concat(LibraryManager.GetLinkedAlternateVersions(oldPrimary).Select(v => v.Id))
                         .Distinct()
