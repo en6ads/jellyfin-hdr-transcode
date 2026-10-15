@@ -127,6 +127,131 @@ public class BaseItemTests
     }
 
     [Fact]
+    public async Task ValidateChildren_ReplacedPrimaryOwnsVersionWithoutLink_MovesVersionBeforeDelete()
+    {
+        var previousLibrary = BaseItem.LibraryManager;
+        var previousRepository = BaseItem.ItemRepository;
+        var previousLogger = BaseItem.Logger;
+        var previousMediaSourceManager = BaseItem.MediaSourceManager;
+        var previousScheduler = Folder.LimitedConcurrencyLibraryScheduler;
+        var previousRecordingsManager = Video.RecordingsManager;
+        var oldPrimary = new Movie { Id = Guid.NewGuid(), Path = "/media/alien/Alien - Directors Cut.mkv", LocalAlternateVersions = ["/media/alien/Alien - Theatrical Cut.mkv"] };
+        var version = new Movie { Id = Guid.NewGuid(), Path = "/media/alien/Alien - Theatrical Cut.mkv", OwnerId = oldPrimary.Id };
+        version.SetPrimaryVersionId(oldPrimary.Id);
+        var newPrimary = new Movie { Id = Guid.NewGuid(), Path = "/media/alien/Alien - Directors Cut (renamed).mkv", LocalAlternateVersions = [version.Path] };
+        var events = new List<string>();
+        var library = new Mock<ILibraryManager>();
+
+        // The version's link to the old primary is gone; only its owner still ties it to that primary.
+        library.Setup(l => l.GetLocalAlternateVersionIds(It.IsAny<Video>())).Returns(Array.Empty<Guid>());
+        library.Setup(l => l.GetLinkedAlternateVersions(It.IsAny<Video>())).Returns(Array.Empty<Video>());
+        library.Setup(l => l.GetNewItemId(version.Path, It.IsAny<Type>())).Returns(version.Id);
+        library.Setup(l => l.GetItemById(version.Id)).Returns(version);
+        library.Setup(l => l.UpdateItemAsync(It.IsAny<BaseItem>(), It.IsAny<BaseItem>(), It.IsAny<ItemUpdateType>(), It.IsAny<CancellationToken>()))
+            .Callback((BaseItem item, BaseItem _, ItemUpdateType _, CancellationToken _) => events.Add($"save {item.Id} owner {item.OwnerId}"))
+            .Returns(Task.CompletedTask);
+        library.Setup(l => l.DeleteItem(It.IsAny<BaseItem>(), It.IsAny<DeleteOptions>(), It.IsAny<BaseItem>(), It.IsAny<bool>()))
+            .Callback((BaseItem item, DeleteOptions _, BaseItem _, bool _) => events.Add($"delete {item.Id}"));
+        var repository = new Mock<MediaBrowser.Controller.Persistence.IItemRepository>();
+        repository.Setup(r => r.GetItemList(It.IsAny<InternalItemsQuery>()))
+            .Returns(new BaseItem[] { oldPrimary, version });
+        var directory = new Mock<IDirectoryService>();
+        directory.Setup(d => d.IsAccessible(It.IsAny<string>())).Returns(true);
+        var mediaSourceManager = new Mock<IMediaSourceManager>();
+        mediaSourceManager.Setup(x => x.GetPathProtocol(It.IsAny<string>())).Returns(MediaProtocol.File);
+        try
+        {
+            BaseItem.LibraryManager = library.Object;
+            BaseItem.ItemRepository = repository.Object;
+            BaseItem.Logger = Microsoft.Extensions.Logging.Abstractions.NullLogger<BaseItem>.Instance;
+            BaseItem.MediaSourceManager = mediaSourceManager.Object;
+            Folder.LimitedConcurrencyLibraryScheduler = new Mock<MediaBrowser.Controller.LibraryTaskScheduler.ILimitedConcurrencyLibraryScheduler>().Object;
+            Video.RecordingsManager = new Mock<IRecordingsManager>().Object;
+            var folder = new ResolvedChildrenFolder(newPrimary)
+            {
+                Id = Guid.NewGuid(),
+                Path = "/media/alien"
+            };
+
+            await folder.ValidateChildren(new Progress<double>(), new MetadataRefreshOptions(directory.Object), recursive: false, cancellationToken: TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            // Deleting the old primary deletes what it owns, so the version has to be moved first.
+            Assert.Equal(newPrimary.Id, version.OwnerId);
+            Assert.Equal(newPrimary.Id, version.PrimaryVersionId);
+            var moved = events.IndexOf($"save {version.Id} owner {newPrimary.Id}");
+            var deleted = events.IndexOf($"delete {oldPrimary.Id}");
+            Assert.True(moved >= 0 && moved < deleted, string.Join(", ", events));
+        }
+        finally
+        {
+            BaseItem.LibraryManager = previousLibrary;
+            BaseItem.ItemRepository = previousRepository;
+            BaseItem.Logger = previousLogger;
+            BaseItem.MediaSourceManager = previousMediaSourceManager;
+            Folder.LimitedConcurrencyLibraryScheduler = previousScheduler;
+            Video.RecordingsManager = previousRecordingsManager;
+        }
+    }
+
+    [Fact]
+    public async Task RefreshedOwnedItems_CachedVersionOwnedByDeletedPrimary_IsSavedUnderThisVideo()
+    {
+        var previousLibrary = BaseItem.LibraryManager;
+        var previousLogger = BaseItem.Logger;
+        var previousMediaSourceManager = BaseItem.MediaSourceManager;
+        var previousFileSystem = BaseItem.FileSystem;
+        var previousProviderManager = BaseItem.ProviderManager;
+        var deletedPrimaryId = Guid.NewGuid();
+        var version = new Movie { Id = Guid.NewGuid(), Path = "/media/alien/Alien - Theatrical Cut.mkv", OwnerId = deletedPrimaryId };
+        version.SetPrimaryVersionId(deletedPrimaryId);
+        var primary = new VersionRefreshingMovie
+        {
+            Id = Guid.NewGuid(),
+            ParentId = Guid.NewGuid(),
+            Path = "/media/alien/Alien - Directors Cut (renamed).mkv",
+            IsInMixedFolder = true,
+            LocalAlternateVersions = [version.Path]
+        };
+        var savedOwners = new List<Guid>();
+        var library = new Mock<ILibraryManager>();
+        library.Setup(l => l.GetLocalAlternateVersionIds(It.IsAny<Video>())).Returns(Array.Empty<Guid>());
+        library.Setup(l => l.GetNewItemId(version.Path, It.IsAny<Type>())).Returns(version.Id);
+
+        // The version's row went with the deleted primary, but the cached item still points at it.
+        library.Setup(l => l.GetItemById(version.Id)).Returns(version);
+        library.Setup(l => l.UpdateItemAsync(version, It.IsAny<BaseItem>(), It.IsAny<ItemUpdateType>(), It.IsAny<CancellationToken>()))
+            .Callback((BaseItem item, BaseItem _, ItemUpdateType _, CancellationToken _) => savedOwners.Add(item.OwnerId))
+            .Returns(Task.CompletedTask);
+        var mediaSourceManager = new Mock<IMediaSourceManager>();
+        mediaSourceManager.Setup(x => x.GetPathProtocol(It.IsAny<string>())).Returns(MediaProtocol.File);
+        var fileSystem = new Mock<IFileSystem>();
+        fileSystem.Setup(f => f.FileExists(It.IsAny<string>())).Returns(true);
+        try
+        {
+            BaseItem.LibraryManager = library.Object;
+            BaseItem.Logger = Microsoft.Extensions.Logging.Abstractions.NullLogger<BaseItem>.Instance;
+            BaseItem.MediaSourceManager = mediaSourceManager.Object;
+            BaseItem.FileSystem = fileSystem.Object;
+            BaseItem.ProviderManager = new Mock<IProviderManager>().Object;
+
+            await primary.RefreshVersionsAsync(new MetadataRefreshOptions(new Mock<IDirectoryService>().Object), TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            Assert.Equal(primary.Id, version.OwnerId);
+            Assert.Equal(primary.Id, version.PrimaryVersionId);
+            Assert.NotEmpty(savedOwners);
+            Assert.All(savedOwners, owner => Assert.Equal(primary.Id, owner));
+        }
+        finally
+        {
+            BaseItem.LibraryManager = previousLibrary;
+            BaseItem.Logger = previousLogger;
+            BaseItem.MediaSourceManager = previousMediaSourceManager;
+            BaseItem.FileSystem = previousFileSystem;
+            BaseItem.ProviderManager = previousProviderManager;
+        }
+    }
+
+    [Fact]
     public void SetPrimaryVersionId_Null_RestoresTheItemsOwnPresentationKey()
     {
         var primaryId = Guid.NewGuid();
@@ -808,6 +933,14 @@ public class BaseItemTests
 
             throw new IOException("Simulated directory read failure");
         }
+    }
+
+    private sealed class VersionRefreshingMovie : Movie
+    {
+        public override string GetClientTypeName() => nameof(Movie);
+
+        public Task<bool> RefreshVersionsAsync(MetadataRefreshOptions options, CancellationToken cancellationToken)
+            => RefreshedOwnedItems(options, [], cancellationToken);
     }
 
     private sealed class ResolvedChildrenFolder(params BaseItem[] children) : Folder
