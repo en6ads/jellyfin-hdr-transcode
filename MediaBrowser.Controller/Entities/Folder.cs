@@ -497,14 +497,27 @@ namespace MediaBrowser.Controller.Entities
                         validChildren.Add(currentChild);
                         accessibleChildren.Add(currentChild);
 
-                        if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
+                        // One child that fails to save must not stop the rest of the folder from
+                        // being added and removed.
+                        try
                         {
-                            await currentChild.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
+                            if (currentChild.UpdateFromResolvedItem(child) > ItemUpdateType.None)
+                            {
+                                await currentChild.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                // metadata is up-to-date; make sure DB has correct images dimensions and hash
+                                await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
+                            }
                         }
-                        else
+                        catch (OperationCanceledException)
                         {
-                            // metadata is up-to-date; make sure DB has correct images dimensions and hash
-                            await LibraryManager.UpdateImagesAsync(currentChild).ConfigureAwait(false);
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogError(ex, "Error updating {Path}", currentChild.Path ?? currentChild.Name);
                         }
 
                         continue;
