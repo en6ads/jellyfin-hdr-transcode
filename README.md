@@ -3,8 +3,8 @@
 This is a fork of [jellyfin](https://github.com/jellyfin/jellyfin) that **keeps HDR when the server
 transcodes**, instead of tone-mapping it to SDR, plus two fMP4 HLS timestamp fixes.
 
-This branch, `integration/av1-hdr-tfdt`, is the one to use. It is **Jellyfin 12.2** (`v12.2`) plus
-four commits:
+This branch, `integration/av1-hdr-tfdt`, is the one to use. It is **Jellyfin 12.4** (`v12.4`) plus
+these commits:
 
 | commit | what it does |
 |---|---|
@@ -12,12 +12,17 @@ four commits:
 | Only preserve HDR on filter chains that keep it 10-bit and tagged | guards the above so it only applies where the output really stays HDR |
 | Do not write a negative baseMediaDecodeTime into fMP4 TFDT | `baseMediaDecodeTime` is unsigned per ISO/IEC 14496-12 §8.8.12 |
 | Use make_non_negative instead of make_zero for fMP4 HLS | keeps relative timing rather than flattening it |
+| Add option to ignore AC-3 and E-AC-3 dynamic range control when transcoding | `DisableAc3DynamicRangeControl` passes `-drc_scale 0`, so transcoded audio keeps its mastered level |
+| Delete orphaned alternate versions the same way as any other item | removing a version its film no longer lists no longer fails the library scan with SQLite error 19 |
+| Keep validating a folder when one child fails to save | one item that fails to save no longer stops the rest of the library from updating |
+| Keep a version with its group when the primary file is replaced | replacing a film's main file no longer deletes its other versions or breaks later refreshes |
 
-Five files change, and the HDR behaviour is covered by 22 tests in
-`tests/Jellyfin.Controller.Tests/MediaEncoding/EncodingHelperHdrPassthroughTests.cs`.
+The HDR behaviour is covered by 22 tests in
+`tests/Jellyfin.Controller.Tests/MediaEncoding/EncodingHelperHdrPassthroughTests.cs`; the other
+commits carry their own tests.
 
-Enable it in the server's encoding settings (`EnableHdrPassthrough`, written to
-`encoding.xml`); it is off by default.
+Enable HDR passthrough in the server's encoding settings (`EnableHdrPassthrough`, written to
+`encoding.xml`); it is off by default, as is `DisableAc3DynamicRangeControl`.
 
 ### Building
 
@@ -40,10 +45,10 @@ client fork is
 
 | branch | what it is |
 |---|---|
-| `integration/av1-hdr-tfdt` | **this branch** — 12.2 plus all four commits; what gets deployed |
+| `integration/av1-hdr-tfdt` | **this branch** — 12.4 plus the commits above; what gets deployed |
 | `pr/hdr-passthrough`, `pr/fmp4-negative-tfdt` | the same changes sliced per topic for submission upstream |
 | `master` | superseded — an older 12.1-era version of these patches, kept for history |
-| `v12.1-hdr-transcode.1` (tag) | the previous 12.1-based release |
+| `v12.1-hdr-transcode.1`, `v12.2-hdr-transcode.1` (tags) | the earlier 12.1- and 12.2-based builds |
 
 Issues with Jellyfin itself belong upstream. This is personal work shared so the same build can be
 reproduced; it is not an official Jellyfin release.
